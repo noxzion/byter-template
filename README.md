@@ -8,12 +8,13 @@ make
 make boot
 ```
 
-`make` скачивает нужные заголовки, загрузчик и упаковщик с GitHub, затем собирает
-`build/byter-boot.img`. `make kernel` собирает только `build/kernel.elf`.
-`make boot` отправляет RAM-образ в телефон через `fastboot boot`.
+`make` скачивает ветку `assets` этого репозитория в `.assets/` и собирает
+`build/byter-boot.img`. В ветке находятся Byter ABI, готовый shim, упаковщик и
+`mkbootimg`; template не зависит от исходного репозитория Byter. `make kernel`
+собирает только `build/kernel.elf`. `make boot` отправляет RAM-образ в телефон
+через `fastboot boot`.
 
-Нужны `clang`, `ld.lld`, `llvm-objcopy`, `python3`, `mkbootimg` и `fastboot`.
-Шаблон можно собирать отдельно от основного репозитория; для `make boot` телефон
+Нужны `git`, `clang`, `ld.lld`, `python3` и `fastboot`. Для `make boot` телефон
 должен быть подключён в режиме Fastboot.
 
 Исходник ядра находится в `src/main.c`; настройки компоновки и
