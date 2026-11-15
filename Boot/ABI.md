@@ -36,8 +36,9 @@ claim full Limine Boot Protocol compatibility.
 | `BYTER_DTB_REQUEST_ID` | 0 | 0 | `dtb_ptr` | Original DTB pointer received from ABL. The response does not provide a DTB size. |
 | `BYTER_FRAMEBUFFER_REQUEST_ID` | 0 | 0 | One framebuffer pointer and its address, dimensions, pitch, bpp, RGB masks, and memory model | Parsed from a DTB `simple-framebuffer` node; otherwise the A059 fallback profile. If no framebuffer is available, `response` remains `NULL`. EDID and video modes are not provided. |
 | `BYTER_HHDM_REQUEST_ID` | 0 | 0 | `offset` | Fixed AArch64 HHDM base `0xffff800000000000`; maps the first 4 GiB, DTB RAM, framebuffer, and known reserved ranges above 4 GiB. |
-| `BYTER_MEMMAP_REQUEST_ID` | 0 | 0 | `entry_count`, pointer array of `{base, length, type}` entries | RAM ranges from DTB, split around `/reserved-memory`, FDT memory-reservation entries, shim, DTB, ELF `PT_LOAD` ranges, and framebuffer. Known reservations and device `reg` ranges translated through each parent bus `ranges` outside RAM are also returned as `RESERVED`. Untranslatable device ranges and ranges beyond the bounded input capacity are omitted. Limited to 512 sorted, non-overlapping output entries. |
+| `BYTER_MEMMAP_REQUEST_ID` | 0 | 0 | `entry_count`, pointer array of `{base, length, type}` entries | RAM ranges from DTB, split around `/reserved-memory`, FDT memory-reservation entries, shim, DTB, ELF `PT_LOAD` ranges, selected module payload pages, and framebuffer. Known reservations and device `reg` ranges translated through each parent bus `ranges` outside RAM are also returned as `RESERVED`. Untranslatable device ranges and ranges beyond the bounded input capacity are omitted. Limited to 512 sorted, non-overlapping output entries. |
 | `BYTER_EXECUTABLE_ADDRESS_REQUEST_ID` | 0 | 0 | `physical_base`, `virtual_base` | Lowest loaded `PT_LOAD` physical and virtual bases. The loader accepts AArch64 `ET_EXEC` segments with a uniform load bias, page-compatible addresses, and non-overlapping mappings; the example uses a higher-half VMA. |
+| `BYTER_MODULE_REQUEST_ID` | 0 | 0 | `module_count`, array of `struct byter_file *` | Files attached to the selected catalog entry. Module payloads are embedded in the Android kernel Image and stay available for the kernel lifetime; their memory-map ranges are `EXECUTABLE_AND_MODULES`. Paths are the config values, strings are currently empty, media type is generic, and module request revision 1/internal modules and compression are unsupported. |
 
 The current handoff enters at EL1 with the MMU and caches enabled, using a
 4 KiB translation granule and 48-bit virtual addressing. Base-revision-0
@@ -66,6 +67,22 @@ The shim prints boot progress directly to the framebuffer using its built-in
 loading stages and the specific stage of page-table setup failures. The last
 printed line remains visible if execution stops. The font bitmap is CC0.
 
+## Android boot image catalog
+
+The packer embeds a bounded catalog after the shim. It stores up to 16 entries;
+each entry has a printable ASCII label (1–63 bytes), an AArch64 ELF, a
+NUL-terminated UTF-8 command line (0–1024 bytes), and up to 128 modules total
+across the catalog. Repeat `module=PATH` within an entry to attach files; paths
+are resolved relative to the config file and retained as the module path in
+`struct byter_file`. Module strings are currently empty. The version 2 catalog
+validates offsets, lengths, string terminators, module ownership, and
+non-overlapping ELF/module payloads; version 1 catalogs remain readable.
+Volume Up/Down move through entries, Power selects, Essential Key requests a
+reboot into the A059 bootloader Fastboot mode, and timeout selects entry zero.
+The centered menu is drawn over the existing splash framebuffer without clearing
+its logo. The legacy `kernel=`/`cmdline=` config maps to one entry named
+`Byter` and may also include `module=` lines.
+
 ## Declared but not implemented
 
 The following IDs are declared in `byter.h`, but the shim does not implement
@@ -76,7 +93,7 @@ their responses. Requests using them receive `response == NULL`:
 | `BYTER_FIRMWARE_TYPE_REQUEST_ID` | `BYTER_STACK_SIZE_REQUEST_ID` | — |
 | `BYTER_FLANTERM_FB_INIT_PARAMS_REQUEST_ID` | `BYTER_PAGING_MODE_REQUEST_ID` | `BYTER_MP_REQUEST_ID` |
 | `BYTER_ENTRY_POINT_REQUEST_ID` | `BYTER_EXECUTABLE_FILE_REQUEST_ID` | `BYTER_RSDP_REQUEST_ID` |
-| `BYTER_MODULE_REQUEST_ID` | `BYTER_SMBIOS_REQUEST_ID` | `BYTER_EFI_SYSTEM_TABLE_REQUEST_ID` |
+| `BYTER_SMBIOS_REQUEST_ID` | `BYTER_EFI_SYSTEM_TABLE_REQUEST_ID` |
 | `BYTER_TPM_EVENT_LOG_REQUEST_ID` | `BYTER_EFI_MEMMAP_REQUEST_ID` | `BYTER_DATE_AT_BOOT_REQUEST_ID` |
 | `BYTER_RISCV_BSP_HARTID_REQUEST_ID` | `BYTER_BOOTLOADER_PERFORMANCE_REQUEST_ID` | `BYTER_X86_64_KEEP_IOMMU_REQUEST_ID` |
 | `BYTER_TSC_FREQUENCY_REQUEST_ID` | `BYTER_ENTROPY_REQUEST_ID` | — |

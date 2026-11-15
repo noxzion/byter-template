@@ -85,7 +85,6 @@ void byter_console_set_framebuffer(const struct byter_framebuffer *framebuffer) 
     if (changed) {
         cursor_x = MARGIN;
         cursor_y = MARGIN;
-        byter_console_write("BYTER BOOT\n");
     }
 }
 
@@ -94,7 +93,7 @@ void byter_console_write(const char *text) {
     while (*text) {
         u8 character = (u8)*text++;
         if (character == '\n') next_line();
-        else if (character == '\r') continue;
+        else if (character == '\r') cursor_x = MARGIN;
         else if (character == '\t') {
             for (u32 i = 0; i < 4; ++i) draw_glyph(' ');
         } else {
@@ -102,4 +101,29 @@ void byter_console_write(const char *text) {
         }
     }
     __asm__ volatile("dsb sy" ::: "memory");
+}
+
+int byter_console_available(void) {
+    return ready;
+}
+
+void byter_console_get_cursor(u32 *x, u32 *y) {
+    if (!ready) return;
+    if (x) *x = cursor_x;
+    if (y) *y = cursor_y;
+}
+
+int byter_console_set_cursor(u32 x, u32 y) {
+    if (!ready || x > console_fb.width || y > console_fb.height ||
+        console_fb.width - x < CELL_WIDTH || console_fb.height - y < CELL_HEIGHT)
+        return 0;
+    cursor_x = x;
+    cursor_y = y;
+    return 1;
+}
+
+void byter_console_get_size(u32 *width, u32 *height) {
+    if (!ready) return;
+    if (width) *width = (u32)console_fb.width;
+    if (height) *height = (u32)console_fb.height;
 }

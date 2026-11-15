@@ -2,11 +2,9 @@
 	.section .text.boot, "ax"
 	.global _head
 	.global _start
-	.global elf_offset_field
-	.global elf_size_field
+	.global catalog_offset_field
+	.global catalog_size_field
 	.global file_size_field
-	.global cmdline_offset_field
-	.global cmdline_size_field
 _head:
 	b _start
 	.long 0
@@ -17,16 +15,12 @@ _head:
 	.ascii "ARM\x64"
 	.long 0
 	.quad 0                    /* 64: optional replacement DTB offset; zero keeps ABL's DTB */
-elf_offset_field:
-	.quad 0                    /* 72: patched ELF offset within this Image */
-elf_size_field:
-	.quad 0                    /* 80: patched ELF byte size */
+catalog_offset_field:
+	.quad 0                    /* 72: catalog offset within this Image */
+catalog_size_field:
+	.quad 0                    /* 80: catalog byte size */
 file_size_field:
 	.quad 0                    /* 88: patched complete Image size */
-cmdline_offset_field:
-	.quad 0                    /* 96: command line offset within the Image */
-cmdline_size_field:
-	.quad 0                    /* 104: command line size including NUL */
 
 _start:
 	msr daifset, #0xf
@@ -35,16 +29,13 @@ _start:
 	movz x1, #0x400, lsl #16   /* 64 MiB reserved image window */
 	add x1, x19, x1
 	sub sp, x1, #0x10000       /* top of 192 KiB stack */
-	ldr x1, elf_offset_field
+	ldr x1, catalog_offset_field
 	add x2, x19, x1
-	ldr x3, elf_size_field
+	ldr x3, catalog_size_field
 	mov x0, x19
 	mov x1, x20
 	movz x4, #0x400, lsl #16
 	ldr x5, file_size_field
-	ldr x6, cmdline_offset_field
-	add x6, x19, x6
-	ldr x7, cmdline_size_field
 	mrs x9, CurrentEL
 	cmp x9, #0x4
 	b.eq .Lcheck_el1

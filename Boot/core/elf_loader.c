@@ -2,6 +2,8 @@
 #include "../platform/a059/framebuffer.h"
 #include "../arch/aarch64/page_tables.h"
 #include "console.h"
+#include "boot_menu.h"
+#include "boot_catalog.h"
 
 typedef unsigned char u8;
 typedef unsigned short u16;
@@ -18,13 +20,12 @@ void *memcpy(void *destination, const void *source, u64 length) {
 #define MAX_RANGES 512
 #define MAX_OUT_RANGES 512
 #define MAX_PHDRS 128
-#define MAX_MAP_BOUNDARIES (2 + 2 * (MAX_RANGES + MAX_PHDRS + MAX_OUT_RANGES + 6))
+#define MAX_MAP_BOUNDARIES (2 + 2 * (MAX_RANGES + MAX_PHDRS + MAX_OUT_RANGES + BYTER_BOOT_MAX_MODULES + 6))
 #define MAX_IMAGE_SIZE (64ULL * 1024 * 1024)
 #define MAX_ELF_MEMORY (256ULL * 1024 * 1024)
 #define HANDOFF_OFFSET 0x100000ULL
 #define HANDOFF_SIZE 0x10000ULL
 #define STACK_SIZE 0x30000ULL
-#define MAX_CMDLINE_SIZE 1024ULL
 
 typedef struct { u64 base, length; } range;
 typedef struct { u64 entry, ttbr0, ttbr1, tcr; } boot_context;
@@ -654,7 +655,7 @@ static int sort_and_merge_map_entries(struct byter_memmap_entry *entries, u32 *c
 static int build_memory_map(range *memory, u32 memory_count,
                             range *reserved, u32 reserved_count,
                             range shim, range dtb, range *segments, u32 segment_count,
-                            range executable_image,
+                            range executable_image, range *modules, u32 module_count,
                             range framebuffer, int has_framebuffer,
                             range *usable, u32 usable_count,
                             struct byter_memmap_entry *entries, u32 *entry_count) {
@@ -673,6 +674,8 @@ static int build_memory_map(range *memory, u32 memory_count,
             if (!add_map_boundaries(boundaries, &boundary_count, ram, segments[i])) return 0;
         if (!add_map_boundaries(boundaries, &boundary_count, ram, executable_image) ||
             !add_map_boundaries(boundaries, &boundary_count, ram, (range){0, 0x1000})) return 0;
+        for (u32 i = 0; i < module_count; ++i)
+            if (!add_map_boundaries(boundaries, &boundary_count, ram, modules[i])) return 0;
         if (has_framebuffer && !add_map_boundaries(boundaries, &boundary_count, ram, framebuffer)) return 0;
         for (u32 i = 0; i < usable_count; ++i)
             if (!add_map_boundaries(boundaries, &boundary_count, ram, usable[i])) return 0;
@@ -696,6 +699,8 @@ static int build_memory_map(range *memory, u32 memory_count,
             for (u32 j = 0; j < segment_count; ++j)
                 if (contains_range(segments[j], piece)) { type = BYTER_MEMMAP_EXECUTABLE_AND_MODULES; break; }
             if (contains_range(executable_image, piece)) type = BYTER_MEMMAP_EXECUTABLE_AND_MODULES;
+            for (u32 j = 0; j < module_count; ++j)
+                if (contains_range(modules[j], piece)) { type = BYTER_MEMMAP_EXECUTABLE_AND_MODULES; break; }
             if (has_framebuffer && contains_range(framebuffer, piece))
                 type = BYTER_MEMMAP_FRAMEBUFFER;
             if (contains_range((range){0, 0x1000}, piece)) type = BYTER_MEMMAP_RESERVED;
@@ -846,6 +851,7 @@ static void resolve_requests(range *segments, u32 count,
                              struct byter_framebuffer_response *framebuffer,
                              struct byter_memmap_response *memmap,
                              struct byter_executable_address_response *executable_address,
+                             struct byter_module_response *modules,
                              u64 hhdm_offset) {
     u64 window_start, window_end;
     find_request_window(segments, count, &window_start, &window_end);
@@ -887,6 +893,8 @@ static void resolve_requests(range *segments, u32 count,
                     *response = hhdm_pointer((u64)memmap, hhdm_offset);
                 else if (has_id(id, (const u64[])BYTER_EXECUTABLE_ADDRESS_REQUEST_ID))
                     *response = hhdm_pointer((u64)executable_address, hhdm_offset);
+                else if (has_id(id, (const u64[])BYTER_MODULE_REQUEST_ID))
+                    *response = hhdm_pointer((u64)modules, hhdm_offset);
             }
             if (end - address < sizeof(u64)) break;
             address += sizeof(u64);
@@ -895,19 +903,16 @@ static void resolve_requests(range *segments, u32 count,
 }
 
 /* Returns the ELF entry address, or zero on any validation/loading failure. */
-u64 byter_shim_main(u8 *shim, u8 *dtb, u8 *elf, u64 elf_size, u64 shim_size,
-                    u64 file_size, u8 *cmdline, u64 cmdline_size) {
+u64 byter_shim_main(u8 *shim, u8 *dtb, u8 *catalog, u64 catalog_size,
+                    u64 shim_size, u64 file_size) {
     u32 dtb_size = 0, memory_count = 0, reserved_count = 0;
     u32 root_address_cells = 0, root_size_cells = 0;
     framebuffer_info framebuffer_data = {0};
+    struct byter_boot_option options[BYTER_BOOT_MAX_OPTIONS];
+    struct byter_boot_module modules[BYTER_BOOT_MAX_MODULES];
+    u32 option_count = 0;
     range memory[MAX_RANGES], reserved[MAX_RANGES];
     if ((u64)shim > ~0ULL - shim_size || file_size > shim_size) return 0;
-    if (!cmdline || !cmdline_size || cmdline_size > MAX_CMDLINE_SIZE + 1 ||
-        (u64)cmdline < (u64)shim || (u64)cmdline - (u64)shim > file_size ||
-        cmdline_size > file_size - ((u64)cmdline - (u64)shim) ||
-        cmdline[cmdline_size - 1] != 0) return 0;
-    for (u64 i = 0; i + 1 < cmdline_size; ++i)
-        if (cmdline[i] == 0) return 0;
     struct byter_framebuffer early_framebuffer;
     if (byter_a059_framebuffer_fallback(&early_framebuffer))
         set_status_framebuffer(&early_framebuffer);
@@ -945,8 +950,29 @@ u64 byter_shim_main(u8 *shim, u8 *dtb, u8 *elf, u64 elf_size, u64 shim_size,
     status_framebuffer = framebuffer_data;
     sync_status_console();
     log_boot_stage("Device tree and framebuffer ready");
-    if ((u64)elf < (u64)shim || (u64)elf - (u64)shim > file_size ||
+    if (!byter_boot_catalog_parse(shim, file_size, catalog, catalog_size,
+                                  options, modules, &option_count)) {
+        log_boot_stage("ERROR: invalid boot catalog");
+        return 0;
+    }
+    u32 selected = byter_boot_menu_wait(options, option_count);
+    if (selected >= option_count) selected = 0;
+    u8 *elf = options[selected].elf;
+    u64 elf_size = options[selected].elf_size;
+    u8 *cmdline = options[selected].cmdline;
+    u32 module_count = options[selected].module_count;
+    struct byter_boot_module *selected_modules = options[selected].modules;
+    range module_ranges[BYTER_BOOT_MAX_MODULES];
+    if (module_count > BYTER_BOOT_MAX_MODULES ||
+        (u64)elf < (u64)shim || (u64)elf - (u64)shim > file_size ||
         elf_size > file_size - ((u64)elf - (u64)shim)) return 0;
+    for (u32 i = 0; i < module_count; ++i) {
+        u64 address = (u64)selected_modules[i].data;
+        if (address < (u64)shim || address - (u64)shim > file_size ||
+            selected_modules[i].size > file_size - (address - (u64)shim) ||
+            !page_aligned_range((range){address, selected_modules[i].size}, &module_ranges[i]))
+            return 0;
+    }
 
     elf_header *eh;
     elf_program *ph;
@@ -1061,15 +1087,19 @@ u64 byter_shim_main(u8 *shim, u8 *dtb, u8 *elf, u64 elf_size, u64 shim_size,
     struct byter_hhdm_response *hhdm_response = (void *)(framebuffer_response + 1);
     struct byter_memmap_response *memmap_response = (void *)(hhdm_response + 1);
     struct byter_executable_address_response *executable_address_response = (void *)(memmap_response + 1);
-    struct byter_framebuffer *framebuffer = (void *)(executable_address_response + 1);
+    struct byter_module_response *module_response = (void *)(executable_address_response + 1);
+    struct byter_framebuffer *framebuffer = (void *)(module_response + 1);
     struct byter_framebuffer **framebuffers = (void *)(framebuffer + 1);
     struct byter_memmap_entry *memmap_entries = (void *)(framebuffers + 1);
     struct byter_memmap_entry **memmap_entry_pointers = (void *)(memmap_entries + MAX_OUT_RANGES);
-    if ((u8 *)(memmap_entry_pointers + MAX_OUT_RANGES) > handoff + HANDOFF_SIZE) return 0;
+    struct byter_file *module_files = (void *)(memmap_entry_pointers + MAX_OUT_RANGES);
+    struct byter_file **module_file_pointers = (void *)(module_files + BYTER_BOOT_MAX_MODULES);
+    if ((u8 *)(module_file_pointers + BYTER_BOOT_MAX_MODULES) > handoff + HANDOFF_SIZE) return 0;
     u32 memmap_count = 0;
     if (!build_memory_map(memory, memory_count, reserved_pages, reserved_count,
                           shim_pages, dtb_pages,
-                          segments, segment_count, executable_image, framebuffer_pages, has_framebuffer,
+                          segments, segment_count, executable_image,
+                          module_ranges, module_count, framebuffer_pages, has_framebuffer,
                           usable, usable_count, memmap_entries, &memmap_count)) return 0;
     log_boot_stage("Memory map built");
     struct byter_aarch64_range page_table_memory[MAX_RANGES];
@@ -1113,6 +1143,24 @@ u64 byter_shim_main(u8 *shim, u8 *dtb, u8 *elf, u64 elf_size, u64 shim_size,
     };
     *executable_address_response = (struct byter_executable_address_response){
         .revision = 0, .physical_base = low, .virtual_base = virtual_low
+    };
+    for (u32 i = 0; i < module_count; ++i) {
+        module_file_pointers[i] = (struct byter_file *)(u64)
+            hhdm_pointer((u64)&module_files[i], hhdm_offset);
+        module_files[i] = (struct byter_file){
+            .revision = 0,
+            .address = (void *)(u64)hhdm_pointer((u64)selected_modules[i].data, hhdm_offset),
+            .size = selected_modules[i].size,
+            .path = (char *)(u64)hhdm_pointer((u64)selected_modules[i].path, hhdm_offset),
+            .string = (char *)(u64)hhdm_pointer((u64)selected_modules[i].string, hhdm_offset),
+            .media_type = BYTER_MEDIA_TYPE_GENERIC,
+        };
+    }
+    *module_response = (struct byter_module_response){
+        .revision = 0,
+        .module_count = module_count,
+        .modules = (struct byter_file **)(u64)
+            hhdm_pointer((u64)module_file_pointers, hhdm_offset),
     };
     *bootloader_info = (struct byter_bootloader_info_response){
         .revision = 0,
@@ -1167,7 +1215,7 @@ u64 byter_shim_main(u8 *shim, u8 *dtb, u8 *elf, u64 elf_size, u64 shim_size,
 
     resolve_requests(segments, segment_count, bootloader_info, cmdline_response, dtb_response,
                      hhdm_response, framebuffer_result, memmap_response,
-                     executable_address_response, hhdm_offset);
+                     executable_address_response, module_response, hhdm_offset);
     log_boot_stage("Boot protocol responses ready");
     boot_context *context = (boot_context *)(handoff + HANDOFF_SIZE - sizeof(*context));
     *context = (boot_context){eh->entry, page_tables.ttbr0, page_tables.ttbr1, page_tables.tcr};
